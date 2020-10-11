@@ -448,7 +448,8 @@ impl<I2C, E> Si5351Device<I2C>
     }
 
     fn read_register(&mut self, reg: Register) -> Result<u8, Error> {
-        let mut buffer: [u8; 1] = unsafe { mem::uninitialized() };
+        let buffer =   mem::MaybeUninit::<[u8; 1]>::uninit();
+        let mut buffer = unsafe {buffer.assume_init()};
         self.i2c.write_read(self.address, &[reg.addr()], &mut buffer).map_err(i2c_error)?;
         Ok(buffer[0])
     }
