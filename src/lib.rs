@@ -365,6 +365,8 @@ pub struct Si5351Device<I2C> {
     clk_enabled_mask: u8,
     ms_int_mode_mask: u8,
     ms_src_mask: u8,
+    div : Option<(u16,OutputDivider)>,
+
 }
 
 pub trait Si5351 {
@@ -433,6 +435,7 @@ where
             clk_enabled_mask: 0,
             ms_int_mode_mask: 0,
             ms_src_mask: 0,
+            div : None,
         };
 
         si5351
@@ -776,6 +779,16 @@ where
         self.write_register(clock.phase_register(), phase)
     }
 
+    /*
+       
+       
+       
+       
+        self.flush_clock_control(clk)?;
+        self.reset_pll(pll)?;
+        self.flush_output_enabled()?;
+    */
+
     fn set_quadrature_clock_freq(
         &mut self,
         pll: PLL,
@@ -783,8 +796,63 @@ where
         freq: u32,
     ) -> Result<(), Error> {
         let denom: u32 = 1048575;
+        let mut reset_needed = true;
 
+        if self.div.is_none() {
+            let (ms_divider, r_div) = self.find_int_dividers_for_max_pll_freq(900_000_000, freq)?;
+            self.div = Some((ms_divider,r_div));
+            reset_needed = true;
+        } 
+
+        let (ms_divider, r_div) = self.div.as_ref().unwrap();
+
+        // try to re-use existing ms_divider and rdiv first
+        let total_div = *ms_divider as u32 * r_div.denominator_u8() as u32;
+        let (mult, num) = self.find_pll_coeffs_for_dividers(total_div, denom, freq)?;
+        
+        self.compute_vco_frequency(mult, num, denom);
+
+        if let Err(_) = self.setup_pll(pll, mult, num, denom) {
+            reset_needed = true;
+        } 
+
+        if reset_needed {
+            // Err, lets do everything again
+            let (ms_divider, r_div) = self.find_int_dividers_for_max_pll_freq(900_000_000, freq)?;
+            self.div = Some((ms_divider,r_div));
+
+            let total_div = ms_divider as u32 * r_div.denominator_u8() as u32;
+            let (mult, num) = self.find_pll_coeffs_for_dividers(total_div, denom, freq)?;
+
+            let ms = (map_clk_to_ms(&clk.0), map_clk_to_ms(&clk.1));
+
+            self.setup_pll(pll, mult, num, denom)?;
+
+            self.setup_multisynth_int(ms.0, ms_divider, r_div)?;
+            self.setup_multisynth_int(ms.1, ms_divider, r_div)?;
+
+            self.select_clock_pll(clk.0, pll);
+            self.select_clock_pll(clk.1, pll);
+    
+            self.set_clock_enabled(clk.0, true);
+            self.set_clock_enabled(clk.1, true);
+
+            self.flush_clock_control(clk.0)?;
+            self.flush_clock_control(clk.1)?;
+    
+            self.compute_vco_frequency(mult, num, denom);
+    
+            let ninety_deg_phase = self.vco_freq / freq as f32;
+
+            self.set_phase(clk.0, 0)?;
+            self.set_phase(clk.1, ninety_deg_phase as u8  -1)?;
+
+        }
+
+
+        /*
         let (ms_divider, r_div) = self.find_int_dividers_for_max_pll_freq(900_000_000, freq)?;
+
         let total_div = ms_divider as u32 * r_div.denominator_u8() as u32;
         let (mult, num) = self.find_pll_coeffs_for_dividers(total_div, denom, freq)?;
 
@@ -794,6 +862,7 @@ where
 
         self.setup_multisynth_int(ms.0, ms_divider, r_div)?;
         self.setup_multisynth_int(ms.1, ms_divider, r_div)?;
+        
 
         self.select_clock_pll(clk.0, pll);
         self.select_clock_pll(clk.1, pll);
@@ -804,15 +873,16 @@ where
         self.compute_vco_frequency(mult, num, denom);
 
         let ninety_deg_phase = self.vco_freq / freq as f32;
+        */
 
-        self.set_phase(clk.0, 0)?;
-        self.set_phase(clk.1, ninety_deg_phase as u8)?;
+        self.set_clock_enabled(clk.0, true);
+        self.set_clock_enabled(clk.1, true);
 
-        self.flush_clock_control(clk.0)?;
-        self.flush_clock_control(clk.1)?;
 
-        self.reset_pll(pll)?;
-        self.flush_output_enabled()?;
+        if  reset_needed {
+            self.reset_pll(pll)?;
+            self.flush_output_enabled()?;
+        } 
 
         Ok(())
     }
@@ -821,6 +891,16 @@ where
         self.vco_freq
     }
 }
+
+/*
+fn get_mult_and_num(ms_divider:u16, r_div : &OutputDivider, denom:&u32, freq:&u32 ) -> (u8,u32) {
+    
+    let total_div = ms_divider as u32 * r_div.denominator_u8() as u32;
+    let (mult, num) = self.find_pll_coeffs_for_dividers(total_div, denom, freq)?;
+
+    (0,0)
+}
+*/
 
 fn map_clk_to_ms(clk: &ClockOutput) -> Multisynth {
     match clk {
